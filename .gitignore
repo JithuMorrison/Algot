@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.tools/
+.venv/
+__pycache__/
+*.py[cod]
+.env
+backend/data/
+backend/tests
+node-install.log
