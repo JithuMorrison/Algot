@@ -108,9 +108,13 @@ $backendMarker = Join-Path $dependencyDirectory "backend-$projectHash.sha256"
 $frontendMarker = Join-Path $dependencyDirectory "frontend-$projectHash.sha256"
 $requirementsHash = (Get-FileHash -LiteralPath $requirements -Algorithm SHA256).Hash
 $backendImportsPresent = $false
-& $python -c 'import fastapi, uvicorn, kiteconnect, pydantic_settings' 2>$null
-if ($LASTEXITCODE -eq 0) {
-    $backendImportsPresent = $true
+try {
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $python -c 'import fastapi, uvicorn, kiteconnect, pydantic_settings' 2>$null
+    $backendImportsPresent = $LASTEXITCODE -eq 0
+} finally {
+    $ErrorActionPreference = $previousErrorActionPreference
 }
 if (-not $backendImportsPresent -or -not (Test-Path -LiteralPath $backendMarker) -or (Get-Content -LiteralPath $backendMarker -Raw).Trim() -ne $requirementsHash) {
     Write-Host 'Installing backend dependencies...'

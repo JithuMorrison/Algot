@@ -21,11 +21,50 @@ from urllib.request import Request, urlopen
 from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from kiteconnect import KiteConnect, KiteTicker
+from kiteconnect.exceptions import (
+    DataException,
+    GeneralException,
+    InputException,
+    KiteException,
+    NetworkException,
+    PermissionException,
+    TokenException,
+)
 from pydantic import BaseModel, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 logger = logging.getLogger(__name__)
+
+
+def upstream_failure_cause(exc: Exception) -> str:
+    if isinstance(exc, TokenException):
+        return "Kite rejected the saved session; reconnect your Kite account."
+    if isinstance(exc, PermissionException):
+        return "Kite denied access to this resource; check your account permissions."
+    if isinstance(exc, NetworkException):
+        return "Kite could not be reached; check your connection and try again."
+    if isinstance(exc, DataException):
+        return "Kite returned an invalid or unavailable response; try again shortly."
+    if isinstance(exc, InputException):
+        return "Kite rejected the request parameters."
+    if isinstance(exc, GeneralException):
+        return "Kite returned an unexpected error; try again shortly."
+    if isinstance(exc, KiteException):
+        return f"Kite returned an error (HTTP {exc.code})."
+    if isinstance(exc, HTTPError):
+        return f"The upstream service returned HTTP {exc.code}."
+    if isinstance(exc, (TimeoutError, ConnectionError, URLError)):
+        return "The upstream service could not be reached; check your connection and try again."
+    if isinstance(exc, UnicodeDecodeError):
+        return "The upstream service returned data in an unexpected format."
+    return f"The upstream service failed ({type(exc).__name__})."
+
+
+def log_upstream_failure(operation: str, exc: Exception) -> str:
+    cause = upstream_failure_cause(exc)
+    logger.error("%s failed: %s", operation, cause)
+    return cause
 
 
 class Settings(BaseSettings):
@@ -203,7 +242,8 @@ def load_nifty_index(url: str) -> list[dict[str, str]]:
         with urlopen(request, timeout=25) as response:
             content = response.read().decode("utf-8-sig")
     except (HTTPError, URLError, TimeoutError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=502, detail="Could not load the Nifty 100 constituents from the official Nifty Indices CSV.") from exc
+        cause = log_upstream_failure("Loading Nifty 100 constituents", exc)
+        raise HTTPException(status_code=502, detail=f"Could not load the Nifty 100 constituents from the official Nifty Indices CSV. Cause: {cause}") from exc
 
     rows: list[dict[str, str]] = []
     reader = csv.DictReader(io.StringIO(content))
@@ -506,7 +546,8 @@ def _market_quote(kite: KiteConnect, exchange: str, symbol: str) -> float:
             raise ValueError("Missing last traded price.")
         return float(last_price)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Could not retrieve the current price for {key}; no order was placed.") from exc
+        cause = log_upstream_failure(f"Retrieving current price for {key}", exc)
+        raise HTTPException(status_code=502, detail=f"Could not retrieve the current price for {key}; no order was placed. Cause: {cause}") from exc
 
 
 def _resolve_strategy_order_plan(strategy: dict[str, Any], kite: KiteConnect) -> list[dict[str, Any]]:
@@ -525,7 +566,8 @@ def _resolve_strategy_order_plan(strategy: dict[str, Any], kite: KiteConnect) ->
                 instruments = instruments_by_exchange["NSE"]
                 instrument = next((item for item in instruments if item.get("tradingsymbol") == symbol and item.get("instrument_type") == "EQ"), None)
             except Exception as exc:
-                raise HTTPException(status_code=502, detail="Could not load NSE instruments; no order was placed.") from exc
+                cause = log_upstream_failure("Loading NSE instruments for strategy preview", exc)
+                raise HTTPException(status_code=502, detail=f"Could not load NSE instruments; no order was placed. Cause: {cause}") from exc
             if instrument is None:
                 raise HTTPException(status_code=422, detail=f"{symbol} is not an available NSE equity instrument.")
             exchange = "NSE"
@@ -542,7 +584,8 @@ def _resolve_strategy_order_plan(strategy: dict[str, Any], kite: KiteConnect) ->
                     instruments_by_exchange[exchange] = kite.instruments(exchange)
                 instruments = instruments_by_exchange[exchange]
             except Exception as exc:
-                raise HTTPException(status_code=502, detail=f"Could not load {exchange} option instruments; no order was placed.") from exc
+                cause = log_upstream_failure(f"Loading {exchange} option instruments for strategy preview", exc)
+                raise HTTPException(status_code=502, detail=f"Could not load {exchange} option instruments; no order was placed. Cause: {cause}") from exc
             options = [
                 item for item in instruments
                 if item.get("name") == market
@@ -572,7 +615,8 @@ def _resolve_strategy_order_plan(strategy: dict[str, Any], kite: KiteConnect) ->
                     for offset in range(0, len(quote_keys), 500):
                         quote_prices.update(kite.ltp(*quote_keys[offset:offset + 500]))
                 except Exception as exc:
-                    raise HTTPException(status_code=502, detail="Could not load option prices for premium matching; no order was placed.") from exc
+                    cause = log_upstream_failure("Loading option prices for strategy preview", exc)
+                    raise HTTPException(status_code=502, detail=f"Could not load option prices for premium matching; no order was placed. Cause: {cause}") from exc
                 priced = [
                     (item, quote_prices.get(f"{exchange}:{item['tradingsymbol']}", {}).get("last_price"))
                     for item in contracts
@@ -1036,7 +1080,8 @@ def build_scanner_data(session: dict[str, Any]) -> dict[str, Any]:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail="Could not load Nifty constituents or Kite's NSE instrument list.") from exc
+        cause = log_upstream_failure("Loading Nifty constituents or Kite NSE instruments", exc)
+        raise HTTPException(status_code=502, detail=f"Could not load Nifty constituents or Kite's NSE instrument list. Cause: {cause}") from exc
 
     by_symbol = {
         item["tradingsymbol"]: item
@@ -1048,6 +1093,7 @@ def build_scanner_data(session: dict[str, Any]) -> dict[str, Any]:
     stocks: list[dict[str, Any]] = []
     missing_instruments = 0
     history_errors = 0
+    history_error_causes: dict[str, int] = {}
     requested = 0
     for company in constituents:
         instrument = by_symbol.get(company["symbol"])
@@ -1061,8 +1107,10 @@ def build_scanner_data(session: dict[str, Any]) -> dict[str, Any]:
             raw_candles = kite.historical_data(
                 instrument["instrument_token"], start.isoformat(), today.isoformat(), "day"
             )
-        except Exception:
+        except Exception as exc:
             history_errors += 1
+            cause = upstream_failure_cause(exc)
+            history_error_causes[cause] = history_error_causes.get(cause, 0) + 1
             continue
         candles = [
             {
@@ -1092,8 +1140,14 @@ def build_scanner_data(session: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    if history_errors:
+        logger.warning("Daily candle requests failed for %s of %s stocks: %s", history_errors, requested, history_error_causes)
     if not stocks or (history_errors and history_errors >= requested):
-        raise HTTPException(status_code=502, detail="Kite did not return daily candles for the Nifty 100. Confirm your session and historical data access, then try again.")
+        causes = "; ".join(f"{cause} ({count})" for cause, count in history_error_causes.items())
+        raise HTTPException(
+            status_code=502,
+            detail=f"Kite did not return daily candles for the Nifty 100. Causes: {causes}. Confirm your session and historical data access, then try again.",
+        )
 
     generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
     data = {

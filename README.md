@@ -41,9 +41,14 @@ Open <http://127.0.0.1:5173>. Enter your API key, API secret, and request token 
 
 ## Install as a Windows app
 
-Run `launcher\setup.bat` from the project folder or double-click it:
+Run `launcher\setup.bat` from the project folder or double-click it to install and open the app. After pulling code updates, run these from the project root:
 
-It checks Python and Node.js, installs or updates backend/frontend dependencies when their manifests change, creates the missing default stock watchlist, refreshes the Northstar Desktop and Start menu shortcuts, restarts the local app services from the current source, and opens the dashboard. Run it again after updating project code to restart the backend and frontend with those changes. Routine launches from **Northstar Trading Desk** remain silent and do not restart services that are already running. If a different application is using port 8000 or 5173, setup reports the conflict instead of stopping that application. Startup logs are under `%LOCALAPPDATA%\Northstar\logs`.
+```powershell
+git pull
+.\launcher\setup.bat
+```
+
+Setup checks Python and Node.js, installs or updates backend/frontend dependencies when their manifests change, creates the missing default stock watchlist, refreshes the Northstar Desktop and Start menu shortcuts, restarts the local app services from the current source, and opens the dashboard. The shortcut opens this checkout; after each pull, run setup so already-running services load the updated code. Routine launches from **Northstar Trading Desk** remain silent and do not restart services that are already running. If a different application is using port 8000 or 5173, setup reports the conflict instead of stopping that application. Startup logs are under `%LOCALAPPDATA%\Northstar\logs`.
 
 The shortcut points to this project folder, so keep the folder in place. The app needs the project's `.env`/backend configuration and local runtimes. The launcher does not display, copy, or modify credential files.
 
@@ -72,5 +77,7 @@ The interface uses plain CSS variables in `src/styles.css` for the palette, spac
 - `POST /api/strategies/{id}/preview` and `/exit-preview` — resolve entry/exit contracts without submitting orders
 - `POST /api/strategies/{id}/run` and `/exit` — submit live market orders after explicit confirmation
 - `POST /api/stock-orders` — submits a separately confirmed live PNB NSE equity market order (`BUY` or `SELL`, CNC, day validity); this endpoint does not place mutual fund orders or accept other symbols
+
+Upstream `502` responses include a safe, actionable cause where available (such as an expired Kite session, denied permission, or network failure). Backend logs include the failed operation and cause category; raw provider messages and credentials are not returned to the browser.
 
 Configure Kite credentials locally when signing in. Do not store API secrets or access tokens in this README or commit them to source control.
